@@ -20,6 +20,11 @@ type Track = {
   source: string;
 };
 
+type SearchResponse = {
+  results?: Track[];
+  error?: string;
+};
+
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
 
@@ -39,19 +44,25 @@ const validAudioUrl = (value: string) => {
     return "";
   }
 };
+
 export default function MusicApp() {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const requestRef = useRef(0);
 
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Track[]>([]);
   const [current, setCurrent] = useState<Track | null>(null);
   const [favorites, setFavorites] = useState<Track[]>([]);
   const [queue, setQueue] = useState<Track[]>([]);
-  const [tab, setTab] = useState<"search" | "favorites" | "queue">("search");
+  const [tab, setTab] = useState<"search" | "favorites" | "queue">(
+    "search"
+  );
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("Bir şarkı ara ve dinlemeye başla.");
+  const [notice, setNotice] = useState(
+    "Bir şarkı ara ve dinlemeye başla."
+  );
   const [directUrl, setDirectUrl] = useState("");
   const [directTitle, setDirectTitle] = useState("");
   const [volume, setVolume] = useState(0.85);
@@ -59,16 +70,22 @@ export default function MusicApp() {
   const [duration, setDuration] = useState(0);
   const [ready, setReady] = useState(false);
 
+  // Favorileri ve çalma sırasını sakla.
   useEffect(() => {
     try {
       const saved = localStorage.getItem("mmp-state-v1");
 
       if (saved) {
         const data = JSON.parse(saved);
-        setFavorites(Array.isArray(data.favorites) ? data.favorites : []);
+
+        setFavorites(
+          Array.isArray(data.favorites) ? data.favorites : []
+        );
         setQueue(Array.isArray(data.queue) ? data.queue : []);
       }
-    } catch {}
+    } catch {
+      // Bozuk kayıt varsa uygulama açılmaya devam eder.
+    }
 
     setReady(true);
   }, []);
@@ -81,14 +98,22 @@ export default function MusicApp() {
         "mmp-state-v1",
         JSON.stringify({ favorites, queue })
       );
-    } catch {}
+    } catch {
+      // Depolama kullanılamıyorsa oynatıcı çalışmaya devam eder.
+    }
   }, [favorites, queue, ready]);
 
+  // PWA çevrimdışı desteği.
   useEffect(() => {
-    if ("serviceWorker" in navigator && location.protocol === "https:") {
+    if (
+      "serviceWorker" in navigator &&
+      window.location.protocol === "https:"
+    ) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
   }, []);
+
+  // Şarkıyı oynat.
   const playTrack = useCallback(async (track: Track) => {
     const audio = audioRef.current;
     const url = validAudioUrl(track.audioUrl);
@@ -101,6 +126,7 @@ export default function MusicApp() {
     setError("");
     setTime(0);
     setDuration(0);
+    setPlaying(false);
     setCurrent(track);
 
     audio.src = url;
@@ -109,13 +135,16 @@ export default function MusicApp() {
     try {
       await audio.play();
       setPlaying(true);
-      setNotice("Şimdi çalıyor.");
+      setNotice(`${track.title} çalıyor · ${track.source}`);
     } catch {
       setPlaying(false);
-      setNotice("Oynatma başlamadı. Başka bir ses kaynağı dene.");
+      setNotice(
+        "Oynatma başlamadı. Kaynak bağlantısını veya internetini kontrol et."
+      );
     }
   }, []);
 
+  // Oynat / duraklat.
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -145,45 +174,82 @@ export default function MusicApp() {
       setPlaying(false);
     }
   }, [current, queue, results, favorites, playTrack]);
+
+  // iTunes ve Jamendo sonuçlarını API'den al.
   const search = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (!query.trim()) {
+    const term = query.trim();
+
+    if (!term) {
       setError("Bir şarkı veya sanatçı adı yaz.");
       return;
     }
 
+    const requestId = ++requestRef.current;
+
     setLoading(true);
     setError("");
     setTab("search");
+    setNotice("Müzik katalogları aranıyor...");
 
     try {
       const response = await fetch(
-        `/api/search?q=${encodeURIComponent(query.trim())}`
+        `/api/search?q=${encodeURIComponent(term)}`
       );
 
-      const data = await response.json();
+      const data: SearchResponse = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Arama başarısız.");
+        throw new Error(data.error || "Arama başarısız oldu.");
       }
 
-      setResults(Array.isArray(data.results) ? data.results : []);
+      if (requestId !== requestRef.current) return;
 
-      setNotice(
-        data.results?.length
-          ? `${data.results.length} önizleme bulundu.`
-          : "Sonuç bulunamadı. Başka bir şarkı ara."
-      );
+      const tracks = Array.isArray(data.results)
+        ? data.results.filter(
+            (track) =>
+              track &&
+              typeof track.id === "string" &&
+              typeof track.title === "string" &&
+              typeof track.artist === "string" &&
+              typeof track.audioUrl === "string" &&
+              validAudioUrl(track.audioUrl) !== ""
+          )
+        : [];
+
+      setResults(tracks);
+
+      const fullTracks = tracks.filter((track) =>
+        track.source.toLowerCase().includes("jamendo")
+      ).length;
+
+      const previews = tracks.length - fullTracks;
+
+      if (tracks.length) {
+        setNotice(
+          `${tracks.length} parça bulundu. ${fullTracks} Jamendo sonucu, ${previews} diğer sonuç. Süre ve erişim kaynağa göre değişebilir.`
+        );
+      } else {
+        setNotice(
+          "Sonuç bulunamadı. Başka bir şarkı veya sanatçı ara."
+        );
+      }
     } catch (err) {
+      if (requestId !== requestRef.current) return;
+
       setError(
         err instanceof Error ? err.message : "Bağlantı hatası."
       );
+      setResults([]);
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current) {
+        setLoading(false);
+      }
     }
   };
 
+  // Doğrudan ses bağlantısı ekle.
   const addDirectAudio = async (
     event: FormEvent<HTMLFormElement>
   ) => {
@@ -215,6 +281,8 @@ export default function MusicApp() {
 
     await playTrack(track);
   };
+
+  // Sonraki parça.
   const nextTrack = useCallback(async () => {
     const list = queue.length ? queue : results;
 
@@ -227,9 +295,13 @@ export default function MusicApp() {
       ? list.findIndex((item) => item.id === current.id)
       : -1;
 
-    await playTrack(list[(index + 1 + list.length) % list.length]);
+    const nextIndex =
+      index < 0 ? 0 : (index + 1) % list.length;
+
+    await playTrack(list[nextIndex]);
   }, [queue, results, current, playTrack]);
 
+  // Önceki parça.
   const previousTrack = useCallback(async () => {
     const list = queue.length ? queue : results;
 
@@ -239,9 +311,13 @@ export default function MusicApp() {
       ? list.findIndex((item) => item.id === current.id)
       : 0;
 
-    await playTrack(list[(index - 1 + list.length) % list.length]);
+    const previousIndex =
+      index < 0 ? 0 : (index - 1 + list.length) % list.length;
+
+    await playTrack(list[previousIndex]);
   }, [queue, results, current, playTrack]);
 
+  // Favoriye ekle / çıkar.
   const toggleFavorite = (track: Track) => {
     setFavorites((old) =>
       old.some((item) => item.id === track.id)
@@ -250,6 +326,7 @@ export default function MusicApp() {
     );
   };
 
+  // Çalma sırasına ekle.
   const addToQueue = (track: Track) => {
     setQueue((old) =>
       old.some((item) => item.id === track.id)
@@ -260,13 +337,22 @@ export default function MusicApp() {
     setNotice("Çalma sırasına eklendi.");
   };
 
+  // Ses seviyesini uygula.
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.volume = volume;
     }
   }, [volume]);
+
+  // Telefonun medya kontrolleri.
   useEffect(() => {
-    if (!current || !("mediaSession" in navigator)) return;
+    if (
+      !current ||
+      !("mediaSession" in navigator) ||
+      typeof MediaMetadata === "undefined"
+    ) {
+      return;
+    }
 
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
@@ -315,35 +401,39 @@ export default function MusicApp() {
       : tab === "queue"
         ? queue
         : results;
+
   return (
     <main className="app-shell">
       <audio
         ref={audioRef}
         preload="none"
-        onTimeUpdate={(event) =>
-          setTime(event.currentTarget.currentTime)
-        }
-        onLoadedMetadata={(event) =>
+        onTimeUpdate={(event) => {
+          setTime(event.currentTarget.currentTime);
+        }}
+        onLoadedMetadata={(event) => {
+          const audioDuration = event.currentTarget.duration;
+
           setDuration(
-            Number.isFinite(event.currentTarget.duration)
-              ? event.currentTarget.duration
-              : 0
-          )
-        }
+            Number.isFinite(audioDuration) ? audioDuration : 0
+          );
+        }}
+        onDurationChange={(event) => {
+          const audioDuration = event.currentTarget.duration;
+
+          if (Number.isFinite(audioDuration)) {
+            setDuration(audioDuration);
+          }
+        }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => {
-          if (queue.length || results.length) {
-            void nextTrack();
-          } else {
-            setPlaying(false);
-          }
+          void nextTrack();
         }}
         onError={() => {
           if (current) {
             setPlaying(false);
             setError(
-              "Ses yüklenemedi. Bağlantı kapalı veya dosya biçimi desteklenmiyor olabilir."
+              "Ses yüklenemedi. Bağlantı geçersiz olabilir veya kaynak oynatmaya izin vermiyor olabilir."
             );
           }
         }}
@@ -373,7 +463,7 @@ export default function MusicApp() {
           </h1>
 
           <p className="subtext">
-            Şarkıları ara, önizlemeleri dinle ve kendi çalma sıranı oluştur.
+            Müzik ara, kaynakları karşılaştır ve çalma sıranı oluştur.
           </p>
 
           <form className="searchbar" onSubmit={search}>
@@ -392,10 +482,11 @@ export default function MusicApp() {
           </form>
 
           <div className="source-note">
-            Kısa müzik önizlemeleri ve izinli ses bağlantıları
+            iTunes önizlemeleri · Jamendo parçaları · Ses bağlantıları
           </div>
         </div>
-   <div className="hero-art" aria-hidden="true">
+
+        <div className="hero-art" aria-hidden="true">
           <div className="orbit orbit-one" />
           <div className="orbit orbit-two" />
 
@@ -415,7 +506,10 @@ export default function MusicApp() {
         <div>
           <p className="eyebrow">KENDİ KAYNAĞIN</p>
           <h2>Ses bağlantısı ekle</h2>
-          <p>Doğrudan MP3 veya erişilebilir ses akışı bağlantısı gir.</p>
+          <p>
+            İzinli, doğrudan MP3 veya erişilebilir ses akışı bağlantısı gir.
+            YouTube ve Spotify sayfa bağlantıları doğrudan ses adresi değildir.
+          </p>
         </div>
 
         <form className="direct-form" onSubmit={addDirectAudio}>
@@ -438,7 +532,8 @@ export default function MusicApp() {
           <button type="submit">Ekle ve çal ↗</button>
         </form>
       </section>
-     <section className="library">
+
+      <section className="library">
         <div className="section-heading">
           <div>
             <p className="eyebrow">KÜTÜPHANEN</p>
@@ -521,7 +616,7 @@ export default function MusicApp() {
                 <span className="track-duration">
                   {track.durationMs
                     ? formatTime(track.durationMs / 1000)
-                    : "URL"}
+                    : "Süre yüklenince görünür"}
                 </span>
 
                 {track.storeUrl && (
@@ -531,7 +626,7 @@ export default function MusicApp() {
                     target="_blank"
                     rel="noreferrer"
                   >
-                    iTunes'ta aç ↗
+                    Kaynağı aç ↗
                   </a>
                 )}
 
@@ -582,21 +677,20 @@ export default function MusicApp() {
                 ? "Henüz favorin yok"
                 : tab === "queue"
                   ? "Çalma sıran boş"
-                  : "Aramaya hazır"}
+                  : loading
+                    ? "Müzikler aranıyor..."
+                    : "Aramaya hazır"}
             </h3>
-            <p>Şarkı ara veya doğrudan ses bağlantısı ekle.</p>
+            <p>
+              Şarkı ara veya izinli bir ses bağlantısı ekle.
+            </p>
           </div>
         )}
-     <p className="legal-note">
-          Arama sonuçları kısa önizlemeler içerebilir. Tam şarkılar için
-          kullanım izni olan ses kaynakları gerekir.{" "}
-          <a
-            href="https://www.apple.com/legal/internet-services/itunes/"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Kullanım koşulları
-          </a>
+
+        <p className="legal-note">
+          iTunes sonuçları kısa önizleme olabilir. Jamendo parçalarının
+          süresi ve kullanım izni parçaya göre değişir. Tam şarkıları
+          kullanmadan önce ilgili lisans koşullarını kontrol et.
         </p>
       </section>
 
@@ -620,6 +714,7 @@ export default function MusicApp() {
           <div className="now-text">
             <strong>{current?.title ?? "Henüz şarkı seçilmedi"}</strong>
             <span>{current?.artist ?? "Bir şarkı seçerek başla"}</span>
+            {current && <small>{current.source}</small>}
           </div>
 
           {current && (
@@ -637,7 +732,8 @@ export default function MusicApp() {
             </button>
           )}
         </div>
-       <div className="player-controls">
+
+        <div className="player-controls">
           <div className="control-buttons">
             <button
               type="button"
@@ -678,7 +774,9 @@ export default function MusicApp() {
               aria-label="Şarkı konumu"
               onChange={(event) => {
                 if (audioRef.current) {
-                  audioRef.current.currentTime = Number(event.target.value);
+                  audioRef.current.currentTime = Number(
+                    event.target.value
+                  );
                 }
               }}
             />
@@ -686,7 +784,8 @@ export default function MusicApp() {
             <span>{formatTime(duration)}</span>
           </div>
         </div>
-      <div className="volume-control">
+
+        <div className="volume-control">
           <span>♫</span>
           <input
             type="range"
@@ -695,10 +794,12 @@ export default function MusicApp() {
             step="0.01"
             value={volume}
             aria-label="Ses seviyesi"
-            onChange={(event) => setVolume(Number(event.target.value))}
+            onChange={(event) =>
+              setVolume(Number(event.target.value))
+            }
           />
         </div>
       </div>
     </main>
   );
-}  
+  }
