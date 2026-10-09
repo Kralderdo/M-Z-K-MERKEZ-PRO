@@ -17,68 +17,64 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const url = new URL("https://itunes.apple.com/search");
+    const clientId = process.env.JAMENDO_CLIENT_ID;
 
-    url.searchParams.set("term", term);
-    url.searchParams.set("entity", "song");
-    url.searchParams.set("media", "music");
+    if (!clientId) {
+      return Response.json(
+        { error: "Jamendo API ayarı eksik." },
+        { status: 500 }
+      );
+    }
+
+    const url = new URL("https://api.jamendo.com/v3.0/tracks/");
+
+    url.searchParams.set("client_id", clientId);
+    url.searchParams.set("format", "json");
     url.searchParams.set("limit", "25");
-    url.searchParams.set("country", "tr");
+    url.searchParams.set("search", term);
+    url.searchParams.set("audioformat", "mp31");
+    url.searchParams.set("include", "licenses");
 
-    const upstream = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-      },
+    const response = await fetch(url, {
       cache: "no-store",
-      signal: AbortSignal.timeout(9000),
+      signal: AbortSignal.timeout(10000),
     });
 
-    if (!upstream.ok) {
+    if (!response.ok) {
       return Response.json(
-        { error: "Müzik kataloğu şu anda yanıt vermiyor." },
+        { error: "Jamendo müzik kataloğu yanıt vermedi." },
         { status: 502 }
       );
     }
 
-    const data = await upstream.json();
+    const data = await response.json();
 
     const results = (Array.isArray(data.results) ? data.results : [])
       .filter(
-        (item: any) =>
-          typeof item.previewUrl === "string" &&
-          typeof item.trackName === "string" &&
-          typeof item.artistName === "string"
+        (track: any) =>
+          typeof track.audio === "string" &&
+          track.audio.startsWith("https://")
       )
-      .map((item: any) => ({
-        id: String(item.trackId ?? item.previewUrl),
-        title: item.trackName,
-        artist: item.artistName,
-        album: item.collectionName ?? "",
-        artwork: (item.artworkUrl100 ?? "").replace(
-          "100x100",
-          "300x300"
-        ),
-        audioUrl: item.previewUrl,
-        storeUrl: item.trackViewUrl ?? "",
-        durationMs: item.trackTimeMillis ?? 0,
-        source: "iTunes önizlemesi",
+      .map((track: any) => ({
+        id: `jamendo-${track.id}`,
+        title: track.name ?? "Bilinmeyen şarkı",
+        artist: track.artist_name ?? "Bilinmeyen sanatçı",
+        album: track.album_name ?? "",
+        artwork: track.album_image ?? "",
+        audioUrl: track.audio,
+        storeUrl: track.shareurl ?? "",
+        durationMs: Number(track.duration ?? 0) * 1000,
+        source: "Jamendo",
       }));
 
     return Response.json(
       { results },
-      {
-        headers: {
-          "Cache-Control": "no-store",
-        },
-      }
+      { headers: { "Cache-Control": "no-store" } }
     );
   } catch {
     return Response.json(
-      {
-        error:
-          "Arama başarısız oldu. İnternet bağlantını kontrol edip yeniden dene.",
-      },
+      { error: "Müzik araması başarısız oldu. Tekrar dene." },
       { status: 502 }
     );
   }
-  }
+        }
