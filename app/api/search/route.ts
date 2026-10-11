@@ -1,110 +1,108 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
-  const term = request.nextUrl.searchParams.get("q")?.trim();
+  const query = request.nextUrl.searchParams.get("q")?.trim();
 
-  if (!term) {
-    return Response.json({ results: [] });
-  }
-
-  if (term.length > 100) {
-    return Response.json(
-      { error: "Arama en fazla 100 karakter olabilir." },
+  if (!query || query.length > 100) {
+    return NextResponse.json(
+      { error: "1 ile 100 karakter arasında bir şarkı adı yaz." },
       { status: 400 }
     );
   }
 
-  const results: any[] = [];
+  const clientId = process.env.JAMENDO_CLIENT_ID;
 
-  // iTunes kısa önizlemeleri
+  if (!clientId) {
+    return NextResponse.json(
+      {
+        error: "JAMENDO_CLIENT_ID ayarlanmamış.",
+        tracks: [],
+      },
+      { status: 503 }
+    );
+  }
+
   try {
-    const url = new URL("https://itunes.apple.com/search");
-    url.searchParams.set("term", term);
-    url.searchParams.set("entity", "song");
-    url.searchParams.set("limit", "15");
-    url.searchParams.set("country", "tr");
+    const url = new URL("https://api.jamendo.com/v3.0/tracks/");
 
-    const response = await fetch(url, {
+    url.searchParams.set("client_id", clientId);
+    url.searchParams.set("format", "json");
+    url.searchParams.set("limit", "30");
+    url.searchParams.set("search", query);
+    url.searchParams.set("audioformat", "mp31");
+    url.searchParams.set(
+      "include",
+      "musicinfo"
+    );
+
+    const response = await fetch(url.toString(), {
       cache: "no-store",
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(15000),
     });
 
-    if (response.ok) {
-      const data = await response.json();
-
-      for (const track of data.results ?? []) {
-        if (typeof track.previewUrl !== "string") continue;
-
-        results.push({
-          id: `itunes-${track.trackId}`,
-          title: track.trackName,
-          artist: track.artistName,
-          album: track.collectionName ?? "",
-          artwork: (track.artworkUrl100 ?? "").replace(
-            "100x100",
-            "300x300"
-          ),
-          audioUrl: track.previewUrl,
-          storeUrl: track.trackViewUrl ?? "",
-          durationMs: track.trackTimeMillis ?? 0,
-          source: "iTunes · Kısa önizleme",
-        });
-      }
+    if (!response.ok) {
+      return NextResponse.json(
+        {
+          error: "Jamendo servisi hata verdi.",
+          status: response.status,
+          tracks: [],
+        },
+        { status: 502 }
+      );
     }
-  } catch {
-    // Diğer kaynakla devam et.
-  }
 
-  // Jamendo tam parça akışları
-  try {
-    const clientId = process.env.JAMENDO_CLIENT_ID;
+    const data = await response.json();
 
-    if (clientId) {
-      const url = new URL("https://api.jamendo.com/v3.0/tracks/");
-      url.searchParams.set("client_id", clientId);
-      url.searchParams.set("format", "json");
-      url.searchParams.set("limit", "15");
-      url.searchParams.set("search", term);
-      url.searchParams.set("audioformat", "mp31");
-
-      const response = await fetch(url, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(8000),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-
-        for (const track of data.results ?? []) {
-          if (
-            typeof track.audio !== "string" ||
-            !track.audio.startsWith("https://")
-          ) {
-            continue;
-          }
-
-          results.push({
-            id: `jamendo-${track.id}`,
-            title: track.name ?? "Bilinmeyen şarkı",
-            artist: track.artist_name ?? "Bilinmeyen sanatçı",
-            album: track.album_name ?? "",
-            artwork: track.album_image ?? "",
-            audioUrl: track.audio,
-            storeUrl: track.shareurl ?? "",
-            durationMs: Number(track.duration ?? 0) * 1000,
-            source: "Jamendo · Tam parça",
-          });
-        }
-      }
+    if (data.headers?.status !== "success") {
+      return NextResponse.json(
+        {
+          error: "Jamendo aramayı başarısız bildirdi.",
+          details: data.headers?.error_message ?? "Bilinmeyen API hatası",
+          tracks: [],
+        },
+        { status: 502 }
+      );
     }
-  } catch {
-    // iTunes sonuçları korunur.
-  }
 
-  return Response.json(
-    { results },
-    { headers: { "Cache-Control": "no-store" } }
-  );
+    const tracks = (Array.isArray(data.results) ? data.results : [])
+      .filter(
+        (track: Record<string, unknown>) =>
+          (typeof track.id === "string" ||
+            typeof track.id === "number") &&
+          typeof track.audio === "string" &&
+          track.audio.startsWith("https://")
+      )
+      .map((track: Record<string, unknown>) => ({
+        id: String(track.id),
+        title: String(track.name ?? "İsimsiz parça"),
+        artist: String(track.artist_name ?? "Bilinmeyen sanatçı"),
+        album: String(track.album_name ?? ""),
+        image: String(track.album_image ?? track.image ?? ""),
+        audio: String(track.audio),
+        duration: Math.max(0, Number(track.duration) || 0),
+        downloadable: track.audiodownload_allowed === true,
+      }));
+
+    return NextResponse.json(
+      { tracks },
+      {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: "Müzik servisine bağlanılamadı.",
+        details:
+          error instanceof Error ? error.message : "Bilinmeyen bağlantı hatası",
+        tracks: [],
+      },
+      { status: 502 }
+    );
   }
+         }
